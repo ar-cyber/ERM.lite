@@ -9,6 +9,8 @@ from utils.prc_api import ResponseFailure
 
 @tasks.loop(minutes=2, reconnect=True)
 async def sync_weather(bot):
+    pass
+    '''
     chosen_filter = {
         "CUSTOM": {"_id": int(config("CUSTOM_GUILD_ID", default=0))},
         "_": {
@@ -140,3 +142,4 @@ async def sync_weather(bot):
 
     except Exception as e:
         logging.error(f"Critical error in weather sync task: {str(e)}", exc_info=True)
+    '''
