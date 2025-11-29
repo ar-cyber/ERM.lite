@@ -12,3 +12,4 @@ package_lock.json
 venv/
 .venv/
 cogs/Jishaku.py
+ptero/
