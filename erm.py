@@ -138,8 +138,9 @@ class Bot(commands.AutoShardedBot):
         await super().close()
 
     async def is_owner(self, user: discord.User):
-        # I've disabled jishaku as it's really poorly implemented so this component isn't needed. Hard-coded IDs aren't safe and I don't want to cause anymore backlash then what I'm receiving. PLEASE STOP BEING NITPICKY ON THINGS; IT IS REALLY NASTY.
-        return False
+        # I will only allow the owner who set their ID consciously into the ENV to use jishaku.
+        if user.id == int(config("JISHAKU_OWNER")):
+            return True
 
     async def setup_hook(self) -> None:
         self.external_http_sessions: list[aiohttp.ClientSession] = []

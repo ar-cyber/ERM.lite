@@ -1,6 +1,14 @@
-# Please don't use this module
+# Dear sysadmin,
+# 
+# Please be REALLY CAREFUL when using this module. It is really dangerous and if not used properly can be a huge security risk.
+# 
+# Please only put YOUR ID into the JISHAKU_OWNER to avoid really bad stuff.
+# I am NOT LIABLE if you get hacked because you didn't configure this properly. 
 #
-# It isn't useful, and has been disabled because of the lack of need. If this was needed, it would be not disabled.
+# Thanks,
+# RobinAnd
+
+
 
 import discord
 import jishaku
@@ -8,13 +16,19 @@ from discord.ext import commands
 from jishaku.codeblocks import codeblock_converter, Codeblock
 from jishaku.cog import STANDARD_FEATURES, OPTIONAL_FEATURES
 from jishaku.features.baseclass import Feature
-
+from erm import Bot
+from decouple import Config, RepositoryEnv
+# init config
+config = Config(RepositoryEnv('.env'))
+print(config("JISHAKU_OWNER"))
+OWNER = int(config("JISHAKU_OWNER"))
+LOGGING_CHANNEL = int(config("JISHAKU_LOGGING_CHANNEL"))
 
 class CustomDebugCog(*OPTIONAL_FEATURES, *STANDARD_FEATURES):
     """
     Custom Jishaku Cog for command logging
     """
-
+    
     @Feature.Command(parent="jsk", name="creator")
     async def jsk_creator(self, ctx: commands.Context):
         try:
@@ -45,6 +59,7 @@ class CustomDebugCog(*OPTIONAL_FEATURES, *STANDARD_FEATURES):
     # Let's just enable this
     # @commands.Cog.listener()
     async def cog_before_invoke(self, ctx: commands.Context):
+        self.bot: Bot
         try:
             channel: discord.TextChannel = await self.bot.fetch_channel(LOGGING_CHANNEL)
         except (discord.NotFound, discord.Forbidden):

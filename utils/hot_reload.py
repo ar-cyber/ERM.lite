@@ -3,7 +3,9 @@ import pathlib
 
 import discord
 from discord.ext import commands, tasks
+from decouple import Config, RepositoryEnv
 
+config = Config(RepositoryEnv('.env'))
 
 def path_from_extension(extension: str) -> pathlib.Path:
     return pathlib.Path(extension.replace(".", os.sep) + ".py")
@@ -42,8 +44,11 @@ class HotReload(commands.Cog):
             except commands.ExtensionError:
                 pass
             else:
-                guild = self.bot.get_guild(1322397901460082729)
-                channel = guild.get_channel(1392042163189317635)
+                # Send a log
+                print(config("CUSTOM_GUILD_ID"))
+                guild = self.bot.get_guild(int(config("CUSTOM_GUILD_ID")))
+                print(guild)
+                channel = guild.get_channel(int(config("JISHAKU_LOGGING_CHANNEL")))
                 await channel.send(f"Reloaded extension: {extension}")
             finally:
                 self.last_modified_time[extension] = time
