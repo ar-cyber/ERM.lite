@@ -20,7 +20,7 @@ from utils.prc_api import ServerLinkNotFound, ResponseFailure
 class OnCommandError(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
+    
     @commands.Cog.listener("on_command_error")
     async def on_command_error(self, ctx, error):
         do_not_send = getattr(ctx, "dnr", False)
@@ -279,7 +279,7 @@ class OnCommandError(commands.Cog):
                 if not do_not_send
                 else None
             )
-
+        
         if not isinstance(
             error,
             (
@@ -327,6 +327,6 @@ class OnCommandError(commands.Cog):
                         )
                     ),
                 )
-
+        
 async def setup(bot):
     await bot.add_cog(OnCommandError(bot))

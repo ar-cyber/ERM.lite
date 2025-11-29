@@ -9,7 +9,7 @@ from utils.constants import BLANK_COLOR
 from utils.paginators import SelectPagination, CustomPage
 from utils.utils import require_settings, get_roblox_by_username
 from utils.autocompletes import user_autocomplete, infraction_type_autocomplete
-
+from menus import Infraction
 
 class Infractions(commands.Cog):
     def __init__(self, bot):
@@ -26,7 +26,7 @@ class Infractions(commands.Cog):
 
     @commands.hybrid_group(name="infractions")
     @is_staff()
-    async def infractions(self, ctx):
+    async def infractions(self, ctx: commands.Context):
         """Base command for infractions"""
         if ctx.invoked_subcommand is None:
             return await ctx.send(
@@ -36,6 +36,7 @@ class Infractions(commands.Cog):
                     color=BLANK_COLOR,
                 )
             )
+        
 
     @commands.guild_only()
     @commands.hybrid_command(
@@ -234,178 +235,160 @@ class Infractions(commands.Cog):
             await ctx.send(embed=embeds[0])
 
     @commands.guild_only()
-    @infractions.command(name="issue", description="Issue an infraction to a user")
+    @infractions.command(name="infract", description="Issue an infraction to a user", extras={"category": "Infractions", "ignoreDefer": True})
     @is_staff()
     @require_settings()
-    @app_commands.autocomplete(type=infraction_type_autocomplete)
-    @app_commands.describe(
-        type="The type of infraction to give",
-        user="The user to issue an infraction to",
-        reason="What is your reason for giving this infraction?",
-    )
-    async def infractions_issue(
-        self, ctx, user: discord.Member, type: str, *, reason: str
-    ):
+    async def infractions_issue(self, ctx):
         """Issue an infraction to a user"""
+        if not ctx.interaction:
+            return await ctx.send(
+                embed=discord.Embed(
+                    title="Not Permitted", 
+                    description="Infractions may only be issued from slash commands", 
+                    color=BLANK_COLOR
+                )
+            )
+        
         has_manager_role = await self.check_manager_role(ctx)
         if not has_manager_role and not await management_predicate(ctx):
-            return await ctx.send(
+            return await ctx.interaction.response.send_message(
                 embed=discord.Embed(
                     title="Permission Denied",
                     description="You need management permissions or your infractions manager permission to issue infractions.",
                     color=BLANK_COLOR,
-                )
+                ),
+                ephemeral=True
             )
 
         settings = await self.bot.settings.find_by_id(ctx.guild.id)
         if not settings:
-            return await ctx.send(
+            return await ctx.interaction.response.send_message(
                 embed=discord.Embed(
                     title="Not Setup",
                     description="Your server is not setup.",
                     color=BLANK_COLOR,
-                )
+                ),
+                ephemeral=True
             )
 
         if not settings.get("infractions"):
-            return await ctx.send(
+            return await ctx.interaction.response.send_message(
                 embed=discord.Embed(
                     title="Not Enabled",
                     description="Infractions are not enabled on this server.",
                     color=BLANK_COLOR,
-                )
-            )
-
-        target_id = user.id
-        target_name = user.name
-
-        infraction_config = next(
-            (
-                inf
-                for inf in settings["infractions"]["infractions"]
-                if inf["name"] == type
-            ),
-            None,
-        )
-
-        if not infraction_config:
-            return await ctx.send(
-                embed=discord.Embed(
-                    title="Invalid Type",
-                    description="This infraction type does not exist.",
-                    color=BLANK_COLOR,
                 ),
-                ephemeral=True,
+                ephemeral=True
             )
 
-        will_escalate = False
-        existing_count = 0
-        original_type = type
-        current_type = type
 
-        if infraction_config.get("escalation"):
-            while True:
-                threshold = infraction_config["escalation"].get("threshold", 0)
-                next_infraction = infraction_config["escalation"].get("next_infraction")
+        modal = Infraction()
+        await ctx.interaction.response.send_modal(modal)
 
-                if not threshold or not next_infraction:
-                    break
+        await modal.wait()
 
-                existing_count = await self.bot.db.infractions.count_documents(
-                    {
-                        "user_id": target_id,
-                        "guild_id": ctx.guild.id,
-                        "type": current_type,
-                        "revoked": {"$ne": True},
-                    }
-                )
+        if not modal.modal_interaction:
+            return
+        
+        user: discord.User
 
-                if (existing_count + 1) >= threshold:
-                    next_config = next(
-                        (
-                            inf
-                            for inf in settings["infractions"]["infractions"]
-                            if inf["name"] == next_infraction
-                        ),
-                        None,
-                    )
-                    if not next_config:
-                        break
-
-                    current_type = next_infraction
-                    will_escalate = True
-                    infraction_config = next_config
-                else:
-                    break
-
-        if will_escalate:
-            type = current_type
-            reason = (
-                f"{reason}\n\nEscalated from {original_type} after reaching threshold"
-            )
-
-        # Create infraction document
-        infraction_doc = {
-            "user_id": target_id,
-            "username": target_name,
-            "guild_id": ctx.guild.id,
-            "type": type,
-            "original_type": original_type if will_escalate else None,
-            "reason": reason,
-            "timestamp": datetime.datetime.now(tz=pytz.UTC).timestamp(),
-            "issuer_id": ctx.author.id,
-            "issuer_username": ctx.author.name,
-            "escalated": will_escalate,
-            "escalation_count": existing_count + 1 if will_escalate else None,
-        }
-
-        result = await self.bot.db.infractions.insert_one(infraction_doc)
-        infraction_doc["_id"] = result.inserted_id
-
-        self.bot.dispatch("infraction_create", infraction_doc)
-
-        target_name = str(target_id)
-        try:
-            member = ctx.guild.get_member(target_id)
-            if member:
-                target_name = member.name
-            else:
-                user = self.bot.get_user(target_id)
-                if user:
-                    target_name = user.name
-                else:
-                    roblox_user = await get_roblox_by_username(
-                        str(target_id), self.bot, ctx
-                    )
-                    if roblox_user and not roblox_user.get("errors"):
-                        target_name = roblox_user["name"]
-        except:
-            pass
-
-        await ctx.send(
-            embed=discord.Embed(
+        embed2 = discord.Embed(
                 title=f"{self.bot.emoji_controller.get_emoji('success')} Infraction Issued",
                 description="Successfully issued an infraction!",
                 color=discord.Color.green(),
-            ).add_field(
-                name="Details",
+            )
+
+        for user in modal.users.component.values:
+            target_name = user.name
+            target_id = user.id
+            # Create infraction document
+            infraction_doc = {
+                "user_id": user.id,
+                "username": user.name,
+                "guild_id": ctx.guild.id,
+                "type": modal.punishment.component.values[0],
+                "original_type": None,
+                "reason": modal.reason.component.value,
+                "timestamp": datetime.datetime.now(tz=pytz.UTC).timestamp(),
+                "issuer_id": ctx.author.id,
+                "issuer_username": ctx.author.name,
+                "escalated": False,
+                "escalation_count": None,
+            }
+
+            result = await self.bot.db.infractions.insert_one(infraction_doc)
+            infraction_doc["_id"] = result.inserted_id
+            embed2.add_field(
+                name=f"Details for user {user.name}",
                 value=(
-                    f"> **User:** {target_name}\n"
-                    f"> **Type:** {type}\n"
-                    f"> **Reason:** {reason}\n"
+                    f"> **User:** {user.name}\n"
+                    f"> **Type:** {modal.punishment.component.values[0]}\n"
+                    f"> **Reason:** {modal.reason.component.value}\n"
+                    f"> **Notes:** {modal.notes.component.value if modal.notes.component.value != "" else "N/A"}\n"
                     f"> **Issued By:** {ctx.author.mention}\n"
                     f"> **Date:** <t:{int(infraction_doc['timestamp'])}:F>\n"
                     f"> **ID:** `{result.inserted_id}`\n"
-                    + (
-                        f"> **Escalated:** Yes (from {original_type})"
-                        if will_escalate
-                        else ""
-                    )
                 ),
                 inline=False,
-            ),
-            ephemeral=True,
-        )
+            )
+            self.bot.dispatch("infraction_create", infraction_doc)
+
+            target_name = str(target_id)
+            try:
+                member = ctx.guild.get_member(target_id)
+                if member:
+                    target_name = member.name
+                else:
+                    user = self.bot.get_user(target_id)
+                    if user:
+                        target_name = user.name
+                    else:
+                        roblox_user = await get_roblox_by_username(
+                            str(target_id), self.bot, ctx
+                        )
+                        if roblox_user and not roblox_user.get("errors"):
+                            target_name = roblox_user["name"]
+            except:
+                pass
+            embed = discord.Embed(title = "You've been infracted", description=(
+                    f"You were infracted in {ctx.guild.name}. Please refer below for more information.\n"
+                    f"> **Type:** {modal.punishment.component.values[0]}\n"
+                    f"> **Reason:** {modal.reason.component.value}\n"
+                    f"> **Notes:** {modal.notes.component.value if modal.notes.component.value != "" else "N/A"}\n"
+                    f"> **Issued By:** {ctx.author.mention}\n"
+                    f"> **Date:** <t:{int(infraction_doc['timestamp'])}:F>\n"
+            ))
+            try:
+                await user.send(embed=embed)
+            except Exception:
+                pass
+        embed = discord.Embed(title = "Infraction Notice", description=(
+                    f"An infraction was issued for these users.\n"
+            ), color=discord.Colour.red())
+        embed.add_field(name = "User(s)", value = " ".join(user.mention for user in modal.users.component.values), inline=False)
+        embed.add_field(name = "Type/Punishment", value = modal.punishment.component.values[0], inline=False)
+        embed.add_field(name = "Reason", value = modal.reason.component.value, inline=False)
+        embed.add_field(name = "Notes", value = modal.notes.component.value if modal.notes.component.value != "" else "N/A", inline=False)
+        embed.add_field(name = "Issuer", value = ctx.author.mention, inline=False)
+        embed.add_field(name = "Date", value = f"<t:{int(infraction_doc['timestamp'])}:F>", inline=False)
+        channel = discord.utils.get(ctx.guild.channels, id=settings.get("infractions").get("channel", 0))
+        await channel.send(" ".join(user.mention for user in modal.users.component.values), embed=embed)
+
+        try:
+            await ctx.interaction.followup.send(
+                embed=embed2,
+                ephemeral=True,
+            )
+        except discord.InteractionResponded:
+            # If the original interaction was already responded to in another path,
+            # try editing the original response or fall back to a normal send.
+            try:
+                await ctx.interaction.edit_original_response(embed=embed)
+            except Exception:
+                try:
+                    await ctx.send(embed=embed)
+                except Exception:
+                    pass
 
     @infractions.command(name="revoke", description="Revoke an infraction using its ID")
     @is_staff()

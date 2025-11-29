@@ -153,12 +153,12 @@ class Bot(commands.AutoShardedBot):
                 )
             )
             self.mongo = motor.motor_asyncio.AsyncIOMotorClient(str(mongo_url))
-            self.db = self.mongo["erm"] 
+            self.db = self.mongo["ermdotlite"] 
 
             
 
 
-            self.panel_db = self.mongo["UserIdentity"]
+            self.panel_db = self.mongo["ermlite_UserIdentity"]
             self.priority_settings = Document(self.panel_db, "PrioritySettings")
             self.staff_requests = Document(self.panel_db, "StaffRequests")
 
@@ -187,8 +187,9 @@ class Bot(commands.AutoShardedBot):
             self.punishments = Warnings(self)
             self.settings = Settings(self.db, "settings")
             self.server_keys = ServerKeys(self.db, "server_keys")
+            self.infractions = Document(self.db, "infractions")
 
-            self.maple_county = self.mongo["MapleCounty"]
+            self.maple_county = self.mongo["ermlite_MapleCounty"]
             self.mc_keys = MapleKeys(self.maple_county, "Auth")
 
             self.staff_connections = StaffConnections(self.db, "staff_connections")
@@ -196,19 +197,14 @@ class Bot(commands.AutoShardedBot):
             self.actions = Actions(self.db, "actions")
             self.prohibited = ProhibitedUseKeys(self.db, "prohibited_keys")
             self.saved_logs = SavedLogs(self.db, "saved_logs")
-            self.whitelabel = Whitelabel(self.mongo["ERMProcessing"], "Instances")
+            
 
             self.pending_oauth2 = PendingOAuth2(self.db, "pending_oauth2")
             self.oauth2_users = OAuth2Users(self.db, "oauth2")
 
             self.accounts = Accounts(self)
 
-            if environment == "CUSTOM":
-                doc = await self.whitelabel.db.find_one({"GuildID": config("CUSTOM_GUILD_ID", default="0")})
-                if not doc:
-                    raise Exception(
-                        "Custom guild ID not found in the database. This means the whitelabel subscription is overdue."
-                    )
+            self.whitelabel = Whitelabel(self.mongo["ERMliteProcessing"], "Instances")
 
             self.roblox = roblox.Client()
             self.prc_api = PRCApiClient(

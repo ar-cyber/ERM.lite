@@ -2794,6 +2794,62 @@ class CustomModal(discord.ui.Modal, title="Edit Reason"):
         await interaction.response.defer(**self.epher_args)
         self.stop()
 
+class Infraction(discord.ui.Modal, title="Create Infraction"):
+    
+    users = discord.ui.Label(
+        text='User',
+        description='Please select the user(s) being infracted.',
+        component=discord.ui.UserSelect(
+            placeholder="Select the users",
+            required=True,
+            min_values=1,
+            max_values=25
+        ),
+    )
+    punishment = discord.ui.Label(
+        text='Punishment',
+        description='Please select from the list of punishments below',
+        component=discord.ui.Select(
+            placeholder="Please select a punishment",
+            options=[
+                discord.SelectOption(label="Warning", description="Issue a warning to these users", value="Warning"),
+                discord.SelectOption(label="Strike", description="Strike these users", value="Strike"),
+                discord.SelectOption(label="Suspension", description="Suspend these users", value="Suspension"),
+                discord.SelectOption(label="Investigation", description="Put these users on UI", value="Under Investigation"),
+                discord.SelectOption(label="Demotion", description="Demote these users", value="Demotion"),
+                discord.SelectOption(label="Termination", description="Terminate these users", value="Termination"),
+            ],
+            required=True
+        )
+    )
+    reason = discord.ui.Label(
+        text="Reason",
+        description="Please enter a reason for this infraction",
+        component=discord.ui.TextInput(
+            placeholder="Please enter a reason",
+            style=discord.TextStyle.long,
+            required=True
+        )
+    )
+    notes = discord.ui.Label(
+        text="Notes",
+        description="Please enter notes. These are not compulsory.",
+        component=discord.ui.TextInput(
+            style=discord.TextStyle.long,
+            placeholder="Enter some additional notes.",
+            required=False
+        )
+    )
+    
+    def __init__(self):
+        super().__init__()
+        self.modal_interaction = None
+    
+    async def on_submit(self, interaction):
+        self.modal_interaction = interaction
+        await interaction.response.defer()
+        self.stop()
+
 
 class SetContent(discord.ui.Modal, title="Set Message Content"):
     name = discord.ui.TextInput(
@@ -6593,6 +6649,40 @@ class ShiftConfiguration(AssociationConfigurationView):
                 view=None,
             )
 
+class InfractionsConfiguration(AssociationConfigurationView):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        placeholder="Infractions Channel",
+        row=1,
+        max_values=1,
+        channel_types=[discord.ChannelType.text],
+    )
+    async def shift_channel_select(
+        self, interaction: discord.Interaction, select: discord.ui.Select
+    ):
+        value = await self.interaction_check(interaction)
+        if not value:
+            return
+
+        await interaction.response.defer()
+        guild_id = interaction.guild.id
+
+        bot = self.bot
+        sett = await bot.settings.find_by_id(guild_id)
+        sett["infractions"]["channel"] = select.values[0].id
+        await bot.settings.update_by_id(sett)
+        await config_change_log(
+            bot,
+            interaction.guild,
+            interaction.user,
+            f"Infractions Channel has been set to <#{select.values[0].id}>.",
+        )
+
+    
 
 class ERMCommandLog(AssociationConfigurationView):
     def __init__(self, *args, **kwargs):
@@ -7994,7 +8084,7 @@ class GameLoggingConfiguration(AssociationConfigurationView):
         if not sett.get("game_logging", {}).get("staff_requests"):
             sett["game_logging"]["staff_requests"] = {}
 
-        sett["game_logging"]["stafF_requests"]["enabled"] = bool(
+        sett["game_logging"]["staff_requests"]["enabled"] = bool(
             select.values[0] == "enabled"
         )
         await bot.settings.update_by_id(sett)
@@ -8090,7 +8180,8 @@ class GameLoggingConfiguration(AssociationConfigurationView):
                     "Staff Requests Pinged Roles",
                     [
                         discord.utils.get(interaction.guild.roles, id=role)
-                        for role in sett["game_logging"]["staff_requests"].get("mentioned_roles")
+                        for role in sett["game_logging"].get("staff_requests", {})
+                                                        .get("mentioned_roles", [])
                     ],
                 ),
                 (
@@ -12397,7 +12488,7 @@ class AccountLinkingMenu(discord.ui.View):
             )
         )
 
-    @discord.ui.button(label="Legacy Code Verification", row=1)
+    @discord.ui.button(label="Code Verification", row=1)
     async def code_verification(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -12451,8 +12542,9 @@ class AccountLinkingMenu(discord.ui.View):
             "Romania",
             "America",
             "Germany",
-            "ERM",
+            "ERM.lite",
             "Electricity",
+            "Sock"
         ]
 
         full_string = f"ERM {' '.join([random.choice(available_string_subsets) for _ in range(6)])}"

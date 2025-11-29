@@ -29,6 +29,7 @@ from menus import (
     ERMCommandLog,
     WhitelistVehiclesManagement,
     PriorityRequestConfiguration,
+    InfractionsConfiguration
 )
 from ui.MapleCounty import MapleCountyConfiguration
 from utils.paginators import CustomPage, SelectPagination
@@ -688,6 +689,22 @@ class Configuration(commands.Cog):
             ],
         )
 
+        infractions_view = InfractionsConfiguration(
+            bot,
+            ctx.author.id,
+            [
+                (
+                    "Infractions Channel",
+                    [
+                        discord.utils.get(ctx.guild.channels, id=channel)
+                        if (channel := settings["infractions"].get("channel"))
+                            else 0
+                    ],
+                ),
+                
+            ],
+        )
+
         ra_config = settings["staff_management"].get("ra_role")
         if isinstance(ra_config, list):
             ra_roles = [discord.utils.get(ctx.guild.roles, id=i) for i in ra_config]
@@ -1012,6 +1029,7 @@ class Configuration(commands.Cog):
                 basic_settings_view,
                 loa_configuration_view,
                 shift_management_view,
+                infractions_view,
                 ra_view,
                 roblox_punishments,
                 security_view,
@@ -1050,6 +1068,14 @@ class Configuration(commands.Cog):
                         "**Enabled:** When enabled, staff members will be able to run `/duty` commands to manage their shift, see how much time they have, as well as see how much time other people have. Management members will be able to administrate people's shifts, add time, remove time, and clear people's shifts.\n\n"
                         "**Shift Channel:** This is where all shift logs will go to. This channel will be used for all modifications to shifts, any person that may be starting or ending their shift.\n\n"
                         "**On-Duty Role:** When someone is on shift, they will be given this role. When the staff member goes off shift, this role will be removed from them."
+                    ),
+                    color=blank_color,
+                ),
+                discord.Embed(
+                    title="Infractions",
+                    description=(
+                        "**What are infractions?** Infractions are moderations for staff, where their rank may be changed, or they are warned or striked.\n\n"
+                        "**Infraction channel:** This channel is where infraction notices are sent. Leave blank to disable sending to a channel.\n\n"
                     ),
                     color=blank_color,
                 ),
