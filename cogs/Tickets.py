@@ -241,7 +241,7 @@ class Tickets(commands.Cog):
         sett = await self.bot.settings.find_by_id(ctx.guild.id)
         embed = discord.Embed(
             title = sett.get("tickets")["message_title"],
-            description = sett.get("tickets")["message_title"]
+            description = sett.get("tickets")["message_msg"]
         )
         view = discord.ui.View(timeout=None)
         view.add_item(TicketDropDown(self.bot, ticket_settings))
