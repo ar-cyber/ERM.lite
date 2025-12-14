@@ -12,6 +12,7 @@ from fastapi import FastAPI, APIRouter, Header, HTTPException, Request
 from discord.ext import commands
 import discord
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from erm import (
@@ -91,8 +92,7 @@ class APIRoutes:
                     f"/{i.removeprefix(x+'_')}",
                     getattr(self, i),
                     methods=[i.split("_")[0].upper()],
-                )
-
+                ) 
     def GET_status(self):
         return {"guilds": len(self.bot.guilds), "ping": round(self.bot.latency * 1000)}
 
@@ -535,6 +535,144 @@ class APIRoutes:
             return HTTPException(status_code=404, detail="Channel not found")
 
         return {"op": 1, "code": 200}
+
+    async def POST_create_loa(
+        self, authorization: Annotated[str | None, Header()], request: Request
+    ):
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Invalid authorization")
+        if not await validate_authorization(self.bot, authorization):
+            raise HTTPException(
+                status_code=401, detail="Invalid or expired authorization."
+            )
+        json_data = await request.json()
+        guild_id = int(json_data.get("guild"))
+        user_id = int(json_data.get("user"))
+        reason = json_data.get("reason")
+        start_type = json_data.get("start_type", "On Approval")
+        start_date = json_data.get("start_date")  # Unix timestamp
+        end_date = json_data.get("end_date")  # Unix timestamp
+
+        logger.info(f"LOA Request: guild={guild_id}, user={user_id}, reason={reason}, start_type={start_type}, start_date={start_date}, end_date={end_date}")
+
+        if not all([guild_id, user_id, reason, end_date]):
+            raise HTTPException(status_code=400, detail=f"Missing required fields: guild={guild_id}, user={user_id}, reason={reason}, end_date={end_date}")
+
+        # Validate start_type
+        if start_type not in ["On Approval", "At Specific Time"]:
+            raise HTTPException(status_code=400, detail="Invalid start_type")
+
+        # If At Specific Time, start_date is required
+        if start_type == "At Specific Time" and not start_date:
+            raise HTTPException(status_code=400, detail="start_date required for 'At Specific Time'")
+
+        guild = self.bot.get_guild(guild_id) or await self.bot.fetch_guild(guild_id)
+        try:
+            member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        except discord.NotFound:
+            raise HTTPException(status_code=400, detail="Member not found")
+
+        # Determine started_at based on start_type
+        if start_type == "On Approval":
+            started_at = int(datetime.datetime.now().timestamp())
+        else:
+            started_at = start_date
+
+        # Create LOA document
+        loa_doc = {
+            "_id": f"{user_id}_{guild_id}_{started_at}_{end_date}",
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "reason": reason,
+            "type": "LOA",  # Default type
+            "started_at": started_at,
+            "expiry": end_date,
+            "accepted": False,
+            "denied": False,
+            "expired": False,
+            "message_id": None,
+        }
+
+        # Insert into database
+        result = await self.bot.loas.db.insert_one(loa_doc)
+
+        # Send LOA to management channel using same embed format as POST_send_loa
+        try:
+            settings = await self.bot.settings.find_by_id(guild_id)
+            request_type = "LOA"
+            management_roles = settings.get("staff_management", {}).get(
+                "management_role", []
+            )
+            loa_roles = settings.get("staff_management", {}).get(f"{request_type.lower()}_role")
+
+            embed = discord.Embed(title=f"{request_type} Request", color=BLANK_COLOR)
+            embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else "")
+
+            past_author_notices = [
+                item
+                async for item in self.bot.loas.db.find(
+                    {
+                        "guild_id": guild_id,
+                        "user_id": user_id,
+                        "accepted": True,
+                        "denied": False,
+                        "type": request_type.upper(),
+                    }
+                )
+            ]
+
+            embed.add_field(
+                name="Staff Information",
+                value=(
+                    f"> **Staff Member:** {member.mention}\n"
+                    f"> **Top Role:** {member.top_role.name}\n"
+                    f"> **Past {request_type}s:** {len(past_author_notices)}"
+                ),
+                inline=False,
+            )
+
+            embed.add_field(
+                name="Request Information",
+                value=(
+                    f"> **Type:** {request_type}\n"
+                    f"> **Reason:** {reason}\n"
+                    f"> **Starts At:** <t:{started_at}>\n"
+                    f"> **Ends At:** <t:{end_date}>"
+                ),
+            )
+
+            view = LOAMenu(
+                self.bot,
+                management_roles,
+                loa_roles,
+                loa_doc,
+                user_id,
+                (code := system_code_gen()),
+            )
+
+            staff_channel = settings.get("staff_management", {}).get("channel")
+            staff_channel = discord.utils.get(guild.channels, id=staff_channel)
+
+            if staff_channel:
+                msg = await staff_channel.send(embed=embed, view=view)
+                loa_doc["message_id"] = msg.id
+                await self.bot.views.insert(
+                    {
+                        "_id": code,
+                        "args": ["SELF", management_roles, loa_roles, loa_doc, user_id, code],
+                        "view_type": "LOAMenu",
+                        "message_id": msg.id,
+                    }
+                )
+                # Update LOA with message_id
+                await self.bot.loas.db.update_one(
+                    {"_id": loa_doc["_id"]},
+                    {"$set": {"message_id": msg.id}}
+                )
+        except Exception as e:
+            logger.error(f"Error sending LOA to management channel: {e}")
+
+        return {"status": "success", "_id": str(loa_doc["_id"]), "created_at": int(datetime.datetime.now().timestamp())}
 
     async def POST_send_loa(
         self, authorization: Annotated[str | None, Header()], request: Request
@@ -1016,6 +1154,217 @@ class APIRoutes:
         #     )
 
         # return warning_objects
+
+    async def POST_get_punishments(
+        self, request: Request
+    ):
+        """Fetch recent punishments/infractions for a guild"""
+        json_data = await request.json()
+        guild_id = json_data.get("guild")
+        count = json_data.get("count", 30)
+
+        if not guild_id:
+            raise HTTPException(status_code=400, detail="Missing 'guild' parameter")
+
+        try:
+            infractions = []
+            async for infraction in self.bot.db.infractions.find(
+                {"guild_id": int(guild_id), "revoked": {"$ne": True}}
+            ).sort([("timestamp", -1)]).limit(count):
+                infractions.append({
+                    "id": str(infraction.get("_id")),
+                    "user": str(infraction.get("user_id")),
+                    "username": infraction.get("username"),
+                    "reason": infraction.get("reason"),
+                    "type": infraction.get("type"),
+                    "created_at": int(infraction.get("timestamp", 0)),
+                    "roblox_id": infraction.get("roblox_id"),
+                    "issuer_id": infraction.get("issuer_id"),
+                    "issuer_username": infraction.get("issuer_username"),
+                    "escalated": infraction.get("escalated", False),
+                })
+            
+            return infractions
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch punishments: {str(e)}")
+
+    async def POST_get_user_shifts(
+        self, authorization: Annotated[str | None, Header()], request: Request
+    ):
+        """Fetch shifts for a specific user in a guild"""
+        json_data = await request.json()
+        guild_id = json_data.get("guild")
+        user_id = json_data.get("user")
+
+        if not guild_id or not user_id:
+            raise HTTPException(
+                status_code=400, detail="Missing 'guild' or 'user' parameter"
+            )
+
+        shifts = []
+        # Query for shifts belonging to this user and guild
+        async for shift_doc in self.bot.shift_management.shifts.db.find(
+            {"UserID": int(user_id), "Guild": int(guild_id)}
+        ):
+            shifts.append({
+                "_id": str(shift_doc["_id"]),
+                "username": shift_doc.get("Username"),
+                "user_id": shift_doc.get("UserID"),
+                "type": shift_doc.get("Type"),
+                "start_time": shift_doc.get("StartEpoch"),
+                "end_time": shift_doc.get("EndEpoch"),
+                "guild": shift_doc.get("Guild"),
+            })
+
+        return shifts
+
+    async def POST_get_user_loas(
+        self, request: Request
+    ):
+        """Fetch LOA history for a specific user in a guild"""
+        json_data = await request.json()
+        guild_id = json_data.get("guild")
+        user_id = json_data.get("user")
+
+        if not guild_id or not user_id:
+            raise HTTPException(
+                status_code=400, detail="Missing 'guild' or 'user' parameter"
+            )
+
+        loas = []
+        # Query for LOAs belonging to this user and guild
+        async for loa_doc in self.bot.loas.db.find(
+            {"guild_id": int(guild_id), "user_id": int(user_id)}
+        ).sort([("_id", -1)]):
+            loas.append({
+                "_id": str(loa_doc["_id"]),
+                "reason": loa_doc.get("reason"),
+                "type": loa_doc.get("type"),
+                "started_at": loa_doc.get("started_at"),
+                "expiry": loa_doc.get("expiry"),
+                "accepted": loa_doc.get("accepted"),
+                "denied": loa_doc.get("denied"),
+                "expired": loa_doc.get("expired"),
+            })
+
+        return loas
+
+    async def POST_update_loa(
+        self, request: Request
+    ):
+        """Update an LOA's end date"""
+        json_data = await request.json()
+        loa_id = json_data.get("loa_id")
+        end_date = json_data.get("end_date")
+
+        if not loa_id or not end_date:
+            raise HTTPException(
+                status_code=400, detail="Missing 'loa_id' or 'end_date' parameter"
+            )
+
+        try:
+            from bson import ObjectId
+            loa_doc = await self.bot.loas.db.find_one({"_id": ObjectId(loa_id)})
+            if not loa_doc:
+                raise HTTPException(status_code=404, detail="LOA not found")
+
+            # Update the end date
+            await self.bot.loas.db.update_one(
+                {"_id": ObjectId(loa_id)},
+                {"$set": {"expiry": int(end_date)}}
+            )
+
+            return {"status": "success", "message": "LOA updated successfully"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update LOA: {str(e)}")
+
+    async def POST_end_loa(
+        self, request: Request
+    ):
+        """End an active LOA"""
+        json_data = await request.json()
+        loa_id = json_data.get("loa_id")
+
+        if not loa_id:
+            raise HTTPException(
+                status_code=400, detail="Missing 'loa_id' parameter"
+            )
+
+        try:
+            from bson import ObjectId
+            loa_doc = await self.bot.loas.db.find_one({"_id": ObjectId(loa_id)})
+            if not loa_doc:
+                raise HTTPException(status_code=404, detail="LOA not found")
+
+            # Mark as expired and set the expiry to now
+            await self.bot.loas.db.update_one(
+                {"_id": ObjectId(loa_id)},
+                {"$set": {"expired": True, "expiry": int(datetime.datetime.now().timestamp())}}
+            )
+
+            return {"status": "success", "message": "LOA ended successfully"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to end LOA: {str(e)}")
+
+    async def POST_start_shift(
+        self, authorization: Annotated[str | None, Header()], request: Request
+    ):
+        """Start a shift for a Discord user"""
+        json_data = await request.json()
+        guild_id = json_data.get("guild")
+        user_id = json_data.get("user")
+        shift_type = json_data.get("shift_type", "Default")
+
+        if not guild_id or not user_id:
+            raise HTTPException(
+                status_code=400, detail="Missing 'guild' or 'user' parameter"
+            )
+
+        guild = self.bot.get_guild(int(guild_id))
+        if not guild:
+            raise HTTPException(status_code=404, detail="Guild not found")
+
+        try:
+            member = await guild.fetch_member(int(user_id))
+        except discord.NotFound:
+            raise HTTPException(status_code=404, detail="Could not find Discord member")
+
+        try:
+            # Create shift with the shift management system
+            shift_id = await self.bot.shift_management.add_shift_by_user(
+                member, shift_type, [], guild.id
+            )
+
+            # Fetch the created shift to return it
+            shift_doc = await self.bot.shift_management.fetch_shift(shift_id)
+            
+            return {
+                "status": "success",
+                "_id": str(shift_id),
+                "start_time": shift_doc.start_epoch if shift_doc else int(datetime.datetime.now().timestamp()),
+                "end_time": 0,
+                "user": member.id,
+                "guild": guild.id,
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create shift: {str(e)}")
+
+    async def POST_end_shift(
+        self, authorization: Annotated[str | None, Header()], request: Request
+    ):
+        """End a shift for a user"""
+        json_data = await request.json()
+        shift_id = json_data.get("shift_id")
+
+        if not shift_id:
+            raise HTTPException(status_code=400, detail="Missing 'shift_id' parameter")
+
+        try:
+            # End the shift using the shift management system
+            await self.bot.shift_management.end_shift(shift_id)
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to end shift: {str(e)}")
 
     async def GET_get_token(
         self, authorization: Annotated[str | None, Header()], request: Request
@@ -2108,8 +2457,14 @@ class ServerAPI(commands.Cog):
 
     async def start_server(self):
         try:
-            middleware = MyMiddleware(bot=self.bot)
-            api.add_middleware(BaseHTTPMiddleware, dispatch=middleware)
+            # middleware = MyMiddleware(bot=self.bot)
+            api.add_middleware(
+                CORSMiddleware,
+                allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
             api.include_router(APIRoutes(self.bot).router)
             self.config = uvicorn.Config(
                 "utils.api:api", port=int(config("BIND_PORT", default=5000)), log_level="debug", host="0.0.0.0"

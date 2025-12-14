@@ -18,6 +18,10 @@ from utils.constants import BLANK_COLOR, GREEN_COLOR, RED_COLOR
 from menus import AvatarCheckView
 from utils.username_check import UsernameChecker
 
+from google import genai
+from google.genai import types
+import json
+
 global_aggregate = [
     {
         "$match": {
@@ -45,7 +49,33 @@ global_aggregate = [
 
 count_aggregate = global_aggregate + [{"$count": "total"}]
 
+URL = "https://avatar.roblox.com/v1/users/{}/avatar"
+COLORS = [1, 3, 5, 12, 18, 25, 36, 100, 105, 108, 121, 125, 128, 180, 191, 192, 217, 224, 225, 340, 341, 344, 346, 347, 353, 356, 361, 365, 1001, 1030]
 
+client = genai.Client(
+            api_key=config("GEMINI_API_KEY"),
+        )
+
+    
+tools = [
+    types.Tool(googleSearch=types.GoogleSearch(
+    )),
+]
+generate_content_config = types.GenerateContentConfig(
+    thinking_config=types.ThinkingConfig(thinking_budget=1000),
+    tools=tools,
+    system_instruction=[
+        types.Part.from_text(text="""Note: Don't be too harsh (for example, a visor or the holo compass-like items is acceptable, but angel wings are not). Please be reasonable as well.
+
+ONLY output the JSON format (do not send any other text, and indent):
+
+{
+    \"data\": {
+    \"flagged\": [each flagged item, id only] 
+}
+"""),
+    ],
+)
 async def iterate_prc_logs_global(bot):
     try:
         server_count = await bot.settings.db.aggregate(count_aggregate).to_list(1)
@@ -314,6 +344,53 @@ def process_kill_logs(kill_logs, last_timestamp):
 
     return embeds, latest_timestamp
 
+async def check(items: list):
+    resp = client.models.generate_content(
+        model="model",
+        contents = f"""EVALUATE IF UNREALISTIC\n{items}""",
+        config=generate_content_config
+    )
+    return json.loads(resp.text.replace("```json", "").replace("```", ""))
+async def avatar_check(ids: list):
+    retu = []
+    async with aiohttp.ClientSession as sess:
+        for id in ids:
+            async with sess.post(URL.format(id)) as resp:
+                if resp.status == 200:
+                    d = resp.json()
+                    # Formulate the response object
+                    r = {
+                        "user_id": id,
+                        "result": {
+                            "unrealistic": False,
+                            "current_items": [{"id": x["id"], "name": x["name"]} for x in d["assets"]],
+                            "unrealistic_item_ids": [
+                            ],
+                            "reasons": []
+                        }
+                    }
+
+                    # First, check skin color
+                    t = d["bodyColors"].items()
+                    for k, v in t:
+                        if v not in COLORS:
+                            r["result"]["unrealistic"] = True
+                            r["result"]["reasons"].append("Unrealistic Skin Tones")
+
+                    # Secondly, we'll ask AI to analyse the current items and give us a response
+                    c = await check(r["result"]["current_items"])
+                    if c["flagged"]:
+                        r["result"]["unrealistic"] = True
+                        r["result"]["reasons"].append("Determined unrealistic avatar items")
+                        r["result"]["unrealistic_item_ids"] = check["flagged"]
+                    retu.append(r)
+                    continue
+    return {
+        "success": True,
+        "data": {
+            "results": retu
+        }
+    }
 
 async def process_player_logs(bot, settings, guild_id, player_logs, last_timestamp):
     """Process player logs and return embeds"""
@@ -391,136 +468,127 @@ async def process_player_logs(bot, settings, guild_id, player_logs, last_timesta
         if not enabled:
             return embeds, latest_timestamp
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                        config("AVATAR_CHECK_URL"),
-                        json={"robloxIds": new_join_ids},
-                        timeout=10,
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("success"):
-                            for user_id, result in data["data"]["results"].items():
-                                is_unrealistic = result.get("unrealistic", False)
-                                has_blacklisted_items = False
-                                blacklisted_reasons = []
+        data = await avatar_check(new_join_ids)
+        if data.get("success"):
+            for user_id, result in data["data"]["results"].items():
+                is_unrealistic = result.get("unrealistic", False)
+                has_blacklisted_items = False
+                blacklisted_reasons = []
 
-                                logging.info(f"Processing user {user_id}")
-                                logging.info(
-                                    f"Blacklisted items configured: {settings.get('ERLC', {}).get('avatar_check', {}).get('blacklisted_items', [])}"
+                logging.info(f"Processing user {user_id}")
+                logging.info(
+                    f"Blacklisted items configured: {settings.get('ERLC', {}).get('avatar_check', {}).get('blacklisted_items', [])}"
+                )
+
+                blacklisted_items = (
+                    settings.get("ERLC", {})
+                    .get("avatar_check", {})
+                    .get("blacklisted_items", [])
+                )
+                if blacklisted_items:
+                    current_items = result.get("current_items", [])
+                    logging.info(
+                        f"Current items: {[item['id'] for item in current_items]}"
+                    )
+
+                    for item in current_items:
+                        if str(item["id"]) in map(
+                                str, blacklisted_items
+                        ):
+                            has_blacklisted_items = True
+                            blacklisted_reasons.append(
+                                f"Using a blacklisted item: {item['name']}"
+                            )
+                            logging.info(
+                                f"Found blacklisted item: {item['id']} - {item['name']}"
+                            )
+
+                unrealistic_check = is_unrealistic and not any(
+                    str(item)
+                    in map(
+                        str,
+                        settings.get("ERLC", {}).get(
+                            "unrealistic_items_whitelist", []
+                        ),
+                    )
+                    for item in result.get("unrealistic_item_ids", [])
+                )
+
+                if unrealistic_check or has_blacklisted_items:
+                    logging.info(
+                        f"Avatar check failed - Unrealistic: {unrealistic_check}, Has blacklisted items: {has_blacklisted_items}"
+                    )
+
+                    reasons = (
+                            result.get("reasons", []) + blacklisted_reasons
+                    )
+
+                    channel_id = settings["ERLC"]["avatar_check"][
+                        "channel"
+                    ]
+                    guild = bot.get_guild(
+                        guild_id
+                    ) or await bot.fetch_guild(guild_id)
+                    channel = await fetch_get_channel(guild, channel_id)
+                    if channel:
+                        try:
+                            user = await bot.roblox.get_user(
+                                int(user_id)
+                            )
+                            avatar = await bot.roblox.thumbnails.get_user_avatar_thumbnails(
+                                [user],
+                                type=roblox.thumbnails.AvatarThumbnailType.headshot,
+                            )
+                            avatar_url = avatar[0].image_url
+                        except Exception as e:
+                            logging.error(
+                                f"Error fetching user data: {e}"
+                            )
+                            return embeds, latest_timestamp
+
+                        view = AvatarCheckView(
+                            bot,
+                            user_id,
+                            settings["ERLC"]["avatar_check"].get(
+                                "message", ""
+                            ),
+                        )
+                        await channel.send(
+                            content=", ".join(
+                                [
+                                    f"<@&{role}>"
+                                    for role in settings["ERLC"][
+                                    "avatar_check"
+                                ].get("mentioned_roles", [])
+                                ]
+                            ),
+                            embed=discord.Embed(
+                                title="Unrealistic Avatar Detected",
+                                description="We have detected that a player in your server has an unrealistic avatar.",
+                                color=0x2C2F33,
+                            )
+                            .add_field(
+                                name="Player Information",
+                                value=f"> **Username:** [{user.name}](https://roblox.com/users/{user_id}/profile)\n> **User ID:** {user_id}\n> **Reason:** {', '.join(reasons)}",
+                            )
+                            .set_thumbnail(url=avatar_url)
+                            .set_footer(text = "Please note that this check uses AI and might not be completely accurate."),
+                            view=view,
+                            allowed_mentions=discord.AllowedMentions.all(),
+                        )
+
+                        if settings["ERLC"]["avatar_check"].get(
+                                "message"
+                        ):
+                            await bot.scheduled_pm_queue.put(
+                                (
+                                    guild_id,
+                                    user.name,
+                                    settings["ERLC"]["avatar_check"][
+                                        "message"
+                                    ],
                                 )
-
-                                blacklisted_items = (
-                                    settings.get("ERLC", {})
-                                    .get("avatar_check", {})
-                                    .get("blacklisted_items", [])
-                                )
-                                if blacklisted_items:
-                                    current_items = result.get("current_items", [])
-                                    logging.info(
-                                        f"Current items: {[item['id'] for item in current_items]}"
-                                    )
-
-                                    for item in current_items:
-                                        if str(item["id"]) in map(
-                                                str, blacklisted_items
-                                        ):
-                                            has_blacklisted_items = True
-                                            blacklisted_reasons.append(
-                                                f"Using a blacklisted item: {item['name']}"
-                                            )
-                                            logging.info(
-                                                f"Found blacklisted item: {item['id']} - {item['name']}"
-                                            )
-
-                                unrealistic_check = is_unrealistic and not any(
-                                    str(item)
-                                    in map(
-                                        str,
-                                        settings.get("ERLC", {}).get(
-                                            "unrealistic_items_whitelist", []
-                                        ),
-                                    )
-                                    for item in result.get("unrealistic_item_ids", [])
-                                )
-
-                                if unrealistic_check or has_blacklisted_items:
-                                    logging.info(
-                                        f"Avatar check failed - Unrealistic: {unrealistic_check}, Has blacklisted items: {has_blacklisted_items}"
-                                    )
-
-                                    reasons = (
-                                            result.get("reasons", []) + blacklisted_reasons
-                                    )
-
-                                    channel_id = settings["ERLC"]["avatar_check"][
-                                        "channel"
-                                    ]
-                                    guild = bot.get_guild(
-                                        guild_id
-                                    ) or await bot.fetch_guild(guild_id)
-                                    channel = await fetch_get_channel(guild, channel_id)
-                                    if channel:
-                                        try:
-                                            user = await bot.roblox.get_user(
-                                                int(user_id)
-                                            )
-                                            avatar = await bot.roblox.thumbnails.get_user_avatar_thumbnails(
-                                                [user],
-                                                type=roblox.thumbnails.AvatarThumbnailType.headshot,
-                                            )
-                                            avatar_url = avatar[0].image_url
-                                        except Exception as e:
-                                            logging.error(
-                                                f"Error fetching user data: {e}"
-                                            )
-                                            return embeds, latest_timestamp
-
-                                        view = AvatarCheckView(
-                                            bot,
-                                            user_id,
-                                            settings["ERLC"]["avatar_check"].get(
-                                                "message", ""
-                                            ),
-                                        )
-                                        await channel.send(
-                                            content=", ".join(
-                                                [
-                                                    f"<@&{role}>"
-                                                    for role in settings["ERLC"][
-                                                    "avatar_check"
-                                                ].get("mentioned_roles", [])
-                                                ]
-                                            ),
-                                            embed=discord.Embed(
-                                                title="Unrealistic Avatar Detected",
-                                                description="We have detected that a player in your server has an unrealistic avatar.",
-                                                color=0x2C2F33,
-                                            )
-                                            .add_field(
-                                                name="Player Information",
-                                                value=f"> **Username:** [{user.name}](https://roblox.com/users/{user_id}/profile)\n> **User ID:** {user_id}\n> **Reason:** {', '.join(reasons)}",
-                                            )
-                                            .set_thumbnail(url=avatar_url),
-                                            view=view,
-                                            allowed_mentions=discord.AllowedMentions.all(),
-                                        )
-
-                                        if settings["ERLC"]["avatar_check"].get(
-                                                "message"
-                                        ):
-                                            await bot.scheduled_pm_queue.put(
-                                                (
-                                                    guild_id,
-                                                    user.name,
-                                                    settings["ERLC"]["avatar_check"][
-                                                        "message"
-                                                    ],
-                                                )
-                                            )
-            except Exception as e:
-                logging.error(f"Error in avatar check: {e}")
+                            )
 
     return embeds, latest_timestamp
 

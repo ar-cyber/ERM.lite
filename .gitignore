@@ -13,3 +13,5 @@ venv/
 .venv/
 cogs/Jishaku.py
 ptero/
+dashboard/
+utils/api.py
